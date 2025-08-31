@@ -16,40 +16,65 @@ type Client struct {
 
 const (
 	HeatAlertDownloadURL = "https://www.wbgt.env.go.jp/alert/dl"
-	tokyoTimezone        = "Asia/Tokyo"
+	TokyoTimezone        = "Asia/Tokyo"
 )
 
-func NewClient(baseURL string) *Client {
-	return &Client{
-		baseURL:    baseURL,
-		httpClient: &http.Client{},
-	}
-}
-
-func GetTokyoTime() time.Time {
-	// Get current UTC time
+func getTokyoTime() time.Time {
 	utcTime := time.Now().UTC()
-
-	// Load Tokyo timezone
-	timezone, err := time.LoadLocation(tokyoTimezone)
+	timezone, err := time.LoadLocation(TokyoTimezone)
 	if err != nil {
-		// Fallback to fixed offset if timezone loading fails
-		timezone = time.FixedZone("JST", 9*60*60) // UTC+9
+		timezone = time.FixedZone("JST", 9*60*60) // UTC+9 fallback
 	}
-
-	// Convert to Tokyo local time
 	return utcTime.In(timezone)
 }
 
 func GetAlertEndpoint() string {
-	// target string format: "2025/alert_20250831_05.csv"
-	// Format: YYYY/alert_YYYYMMDD_05.csv
-	// https://pkg.go.dev/time#example-Time.Format
-	tokyoTime := GetTokyoTime()
+	tokyoTime := getTokyoTime()
 	year := tokyoTime.Format("2006")
 	dateStr := tokyoTime.Format("20060102")
-
 	return fmt.Sprintf("%s/alert_%s_05.csv", year, dateStr)
+}
+
+type HeaderRoundTripper struct {
+	base    http.RoundTripper
+	headers map[string]string
+}
+
+func (h *HeaderRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone the request to avoid modifying the original
+	newReq := req.Clone(req.Context())
+
+	// Add default headers
+	for key, value := range h.headers {
+		if newReq.Header.Get(key) == "" { // Only set if not already present
+			newReq.Header.Set(key, value)
+		}
+	}
+
+	return h.base.RoundTrip(newReq)
+}
+
+func NewClient(baseURL string) *Client {
+	// Default headers for all requests
+	defaultHeaders := map[string]string{
+		"Accept":          "text/csv",
+		"Accept-Language": "ja,en-US",
+		"Accept-Charset":  "UTF-8",
+		"User-Agent":      "heat-alert-bot/1.0",
+	}
+
+	transport := &HeaderRoundTripper{
+		base:    http.DefaultTransport,
+		headers: defaultHeaders,
+	}
+
+	return &Client{
+		baseURL: baseURL,
+		httpClient: &http.Client{
+			Transport: transport,
+			Timeout:   30 * time.Second,
+		},
+	}
 }
 
 func (c *Client) FetchCSVData(ctx context.Context, endpoint string) ([]byte, error) {
@@ -71,9 +96,7 @@ func (c *Client) FetchCSVData(ctx context.Context, endpoint string) ([]byte, err
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
 
-	fmt.Println("[GET] fetching today's alert data from", fullURL)
-	req.Header.Set("Accept", "text/csv")
-	req.Header.Set("User-Agent", "heat-alert-bot/1.0")
+	fmt.Printf("[GET] fetching today's alert data from\n > %s\n", fullURL)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -89,6 +112,5 @@ func (c *Client) FetchCSVData(ctx context.Context, endpoint string) ([]byte, err
 	if err != nil {
 		return nil, fmt.Errorf("reading response body: %w", err)
 	}
-
 	return body, nil
 }
